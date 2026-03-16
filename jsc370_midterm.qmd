@@ -1,0 +1,593 @@
+---
+title: "JSC370 Midterm Project - Evolution of Model Efficiency in the Open Source Landscape"
+author: "Huayin Luo"
+format:
+  html:
+    embed-resources: true
+execute:
+  eval: true
+  echo: false
+jupyter: python3
+---
+
+## Introduction
+
+(Code and report at https://github.com/huayinl/jsc370_midterm)
+
+**Background**:
+
+When ChatGPT was first released in 2022, it took the world by storm. Since then, the energy around large language models (LLMs) has only continued to grow, with both excitement and anxiety surrounding the rapid advancements in the field, and the potential implications on a myriad of different industries.
+
+From models with regular hallucinations to ones that generate human-like text with alarming insights, the progress in model performance has been remarkable. This progress has sparked growing interest in not just the continued improvement of model performance, but also how we can leverage the current capabilities of LLMs and translate them into real world applications.
+
+There has been a growing focus on the logistics around the wide scale deployment of LLMs, with model efficiency becoming a key area of focus for researchers and practitioners. For a large majority of industries seeking to leverage the potential of LLMs, the question of how to do so in a cost effective way is critical, and the answer to this question will likely determine the pace of adoption. While foundation models have been powerful, they are not the best fit for every use case, and compute is a coveted resource that is in no way infinite. As such, the question of how to make the most out of the compute resources available is an important one, in many ways such as how to maximize the throughput of a model, minimize latency, energy, and cost.
+
+Since the release of ChatGPT, the LLM landscape has shifted from purely performance-driven research to a focus on practical deployment. As foundational models grow in complexity, model efficiency, encompassing quantization, compression, and high-performance inference, has emerged as a critical engineering bottleneck. Innovative serving systems, such as vLLM, have introduced breakthroughs like PagedAttention to manage memory more efficiently during inference (Kwon et al., 2023). Post training quantization techniques have enabled significant reductions in model size and inference costs while maintaining performance (Dettmers et al., 2022). The release of Deepseek in 2024 has further pushed the boundaries of model efficiency, achieving 4-bit quantization with minimal performance degradation (Zhao et al., 2024), introducing novel methods for KV cache compression (Multi-head latent attention), which tackled the critical bottleneck of memory usage during inference in another way from the previous methods of grouped query attention.
+
+All in all, as the field evolves, the open-source ecosystem around model efficiency has become a key driver of innovation, with a growing number of repositories and projects dedicated to this area. This study explores the open-source evolution of this field using GitHub as a proxy for industry and community priorities.
+
+**Dataset**:
+
+Github is the most widely used developer platforms, with millions of repositories and users. It is an industry standard, and in many cases the go-to platform for open-source projects. For this project, I will be using the Github API to collect data on repositories related to the field of model efficiency, including topics such as model compression, quantization, distillation, hardware-aware compression methods, and so on.
+
+**Research Question**:
+
+My research question is, how has the open-source landscape for deep learning model efficiency evolved since 2022?  What are some of the key developments in this area, and how have they evolved over time?Specifically, has there been a structural pivot from academic experimentation to production-ready engineering solutions?
+
+I have a few hypotheses around this:
+
+(1) **Shift in focus**: I hypothesize that there has been a shift in the focus of the repositories, from more academic experimentation to more production ready engineering solutions, characterized by larger repository sizes and a higher proportion of organization-led (vs. individual) projects. Repository size and the number of stars could be a good proxy for this shift, as more production ready solutions are likely to have larger repositories and more stars.
+
+(2) **Shift in language used**: While Python has been largely the dominant language for deep learning / ML related projects, I hypothesize that as efficiency becomes hardware-critical, there is a measurable shift from interpreted languages such as Python to performance-oriented compiled languages such as C++ and Rust.
+
+(3) **Size of the field**: I hypothesize that the size of the field has grown significantly since 2022, with a significant increase in the number of repositories related to model efficiency, as well as the number of stars and forks for these repositories, indicating a growing interest and adoption in this area. It is likely that the field has experienced non-linear growth, with specific "shocks" or spikes in activity corresponding to major open-source model releases.
+
+## Methods
+### Data Acquisition (how and where the data was acquired)
+First, I collected data using the GitHub REST API v3 Search endpoint for repositories. 
+
+The query used was: `model_efficiency OR quantization OR llm-inference OR model-compression OR vllm`. I chose these keywords to capture a broad range of repositories related to model efficiency, including specific techniques (quantization, model compression) and more general terms (model efficiency, llm-inference).
+
+Results were sorted by stars in descending order (`sort=stars`, `order=desc`) and retrieved in pages of 100 repositories each for 10 pages, yielding up to 1000 repositories. Data were requested using Python's `requests` library with a 1-second delay between requests to reduce API pressure. The raw API response was converted to a pandas DataFrame. 
+
+The initial pull contains 82 columns, including repository metadata, engagement metrics, timestamps, and nested fields (for example `owner`, `license`, and `topics`).
+
+Thus, the shape of the raw dataset is (1000, 82), with 1000 repositories and 82 columns.
+
+```{python}
+#| echo: false
+#| warning: false
+#| include: false
+#| label: 1-data-acquisition
+import requests
+import pandas as pd
+import time
+
+def fetch_github_data(query, token=None, num_pages=10):
+    headers = {'Authorization': f'token {token}'} if token else {}
+    all_repos = []
+    
+    for page in range(1, num_pages + 1): 
+        url = f"https://api.github.com/search/repositories?q={query}&sort=stars&order=desc&per_page=100&page={page}"
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            items = response.json().get('items', [])
+            all_repos.extend(items)
+        time.sleep(1)
+        
+    return pd.DataFrame(all_repos)
+
+query_str = "quantization OR llm-inference OR model-compression OR vllm"
+start_time = time.time()
+print("Fetching repos from GitHub...")
+df = fetch_github_data(query_str, num_pages=10)
+print(f"Data fetched in {time.time() - start_time:.2f} seconds. Total repositories: {len(df)}")
+print(f"Dataset shape: {df.shape}")
+
+
+# save as CSV for reproducibility
+df.to_csv("raw_dataset.csv", index=False)
+```
+
+### Data Preparation (how the data was cleaned and wrangled)
+From the 82 metadata fields provided by the GitHub API, I identified a subset of key variables of interest to test my hypotheses. These include stargazers_count and forks_count as proxies for community adoption, language and size to measure technical complexity, and created_at and pushed_at to track the time the repo was created and last updated. has_wiki and has_pages can be indicators of the maturity of a project, and the level of documentation available.
+
+Firstly, I used the unique GitHub id as a primary key to drop duplicate entries. This ensured that no project was over-represented in the engagement metrics (stars/forks). Since I had used a Boolean OR search query (quantization OR llm-inference...), the same repository may have appeared in multiple keyword results.
+
+Next, I filtered out repositories that may be more tutorial or list-style repositories (for example, "awesome-quantization" or "model-compression-tutorial"), since these are more likely to be educational resources than large production-ready repositories. I used a combination of name-based keyword filtering (looking for "awesome", "list", "tutorial", "introduction") and size-based filtering (removing repos smaller than 50 KB) to achieve this.
+
+Then, I converted the created_at and year fields to datetime objects, instead of strings, for easier analysis later on.
+
+I added a binary feature, is_org, which is true if the owner is identified as an organization. This is to help distinguish between large corporate-backed or organization-led projects and individual-led projects, which may have different implications for the maturity and production-readiness of the repositories.
+
+From the raw fields, I selected the following key variables for analysis, which broadly fall into three categories:
+
+- Temporal: `created_at`, `pushed_at`
+- Engagement: `stargazers_count`, `forks_count`, `open_issues_count`
+- Technical: `language`, `size`, `topics`, `has_wiki`, `has_pages`
+
+I excluded redundant or duplicate-style fields where appropriate (for example, preferring `forks_count` over `forks`, and `open_issues_count` over `open_issues`) and treated nested JSON columns separately.
+
+
+```{python}
+#| label: 2-data-cleaning
+#| echo: false
+#| warning: false
+
+import datetime
+
+# drop duplicates
+df_clean = df.drop_duplicates(subset='id').copy()
+# print(f"After deduplication, we have {len(df_clean)} unique repositories.")
+
+# filter out tutorial/list-style repositories
+keywords_to_exclude = ['awesome', 'list', 'tutorial', 'introduction']
+pattern = '|'.join(keywords_to_exclude)
+excluded_mask = (df_clean['name'].str.contains(pattern, case=False, na=False)) | (df_clean['size'] <= 50)
+
+# see which repos are being excluded
+# print(df_clean[excluded_mask][['name', 'size']]) 
+
+df_clean = df_clean[~excluded_mask].copy()
+print(f"After filtering out small / educational repositories, we have {len(df_clean)} repositories left.")
+
+# convert datatypes
+df_clean['created_at'] = pd.to_datetime(df_clean['created_at'])
+df_clean['year'] = df_clean['created_at'].dt.year
+
+# create indicators
+df_clean['is_org'] = df_clean['owner'].apply(
+    lambda x: x['type'] == 'Organization' if isinstance(x, dict) else False
+)
+performance_langs = ['C++', 'Rust', 'C', 'CUDA', 'Go', 'Swift'] 
+df_clean['is_compiled'] = df_clean['language'].isin(performance_langs)
+
+# select key variables for analysis
+popularity_metrics = ['stargazers_count', 'forks_count']
+technical_metrics = ['language', 'is_compiled', 'topics', "size", "open_issues_count", "has_wiki", "has_pages"]
+time_metrics = ['created_at', 'pushed_at', 'year']
+other_metrics = ['is_org', 'name', 'description']
+
+variables_of_interest = popularity_metrics + technical_metrics + time_metrics + other_metrics
+# print(f"Selected variables: {variables_of_interest}")
+
+df_clean = df_clean[variables_of_interest].copy()
+
+# final dataset
+# print(f"Cleaning complete. Remaining repositories: {len(df_clean)}")
+# print(f"Final dataset shape: {df_clean.shape}")
+```
+
+### Data Exploration (Statistical and Visualization Approach)
+Pandas was used for data manipulation and cleaning, and plotly for visualizations. We started with a summary of the dataset, including missing values, data types, and basic statistics. Then, we explored the distribution of key variables such as stars, forks, and repository size, as well as the prevalence of different programming languages and organizational ownership.
+
+```{python}
+#| tbl-cap: "Summary Statistics of Model Efficiency Repositories"
+
+# check missing values and data types
+missing_summary = df_clean.isnull().sum()
+missing_percent = df_clean.isnull().mean() * 100
+dtypes_summary = df_clean.dtypes.astype(str)
+
+summary_df = pd.DataFrame({
+    'Missing Count': missing_summary,
+    'Missing %': missing_percent.round(2),
+    'Data Type': dtypes_summary
+}).sort_index().sort_values(by='Missing %', ascending=False)
+
+from IPython.display import display, HTML
+display(HTML(summary_df.to_html(classes='table table-striped', float_format="%.2f")))
+```
+
+```{python}
+#| tbl-cap: "Summary Statistics for Numeric Variables"
+# summary statistics for numeric variables
+summary_stats = df_clean.describe().T
+summary_stats = summary_stats[['mean', '50%', 'max', 'std']]
+summary_stats.columns = ['Mean', 'Median', 'Max', 'Std Dev']
+display(HTML(summary_stats.to_html(classes='table table-striped')))
+```
+
+
+## Preliminary Results
+
+From the API call, we have a raw dataset of 1000 repositories and 82 columns. After data cleaning, we have 913 repositories and 12 columns.
+
+### (1) Summary Statistics
+
+**Repository Count**
+
+We can see that from this set of 1000 most popular repositories related to model efficiency, the field started gradually gaining in traction since 2015, going from 2 repositories in 2015 to 64 in 2019. It plateaus around the early 2020s, with 48 and 47 of the repositories from our dataset created in 2020 and 2021 respectively, and even a gradual decline in 2022, with only 39 repositories created. 
+
+However, there is a sharp increase in 2023, with 196 of the repositories in our dataset created in 2023, 216 created in 2024, and 206 created in 2025. As of the time of this report, it is March 2026, and we are already seeing 24 of the repositories from our dataset being created from 2026.
+
+We can see that the field of model efficiency has been around for a while and there is significant portion of the most starred repositories that were created before late 2022, but there has been a significant increase in the number of repositories related to model efficiency since 2023, aligning with the advent of ChatGPT.
+
+**Stars and Forks**
+
+We visualize the mean number of stars, forks, and size of the repositories by  year, with error bars representing the standard error of the mean. We also overlay the individual data points for each repository to show the distribution within each year, and the names of the relevant repos can be visualized by hovering over these points.
+
+Interestingly, we can see that although the number of repositories has increased significantly since 2023, the mean number of stars and forks for these repositories has not increased at the same pace, and in fact, the mean number of stars and forks for repositories created in 2023 and 2024 are lower than those created in 2020-2022. This could suggest that while there is a growing interest in model efficiency, the newer repositories may not be receiving as much community engagement as the older ones, which could be due to a variety of reasons such as increased competition, or the fact that some of the more foundational and impactful repositories were created in 2022/2023 (ex. vLLM, llama.cpp were both created in 2023). Because the sample size is much smaller for years before 2023, we can see the sharp jump in mean stars and forks for the year 2016, which is because of the presence of one popular repo, ray. (For context, Ray is a foundational infrastructure project that's an industry standard for high performance computing and distributed computing, and has had over a decade to accumulate stars. vLLM is actually built on top of Ray.)
+
+We can see the median on the other hand is a metric that is more robust to outliers. Thus, it provides further data that while the popularity of the field has grown, the number of stars/forks for these repos is not discriminative by recency, which makes sense given that the field in total is still quite young and even the repos pre-2022 are fairly recent, with many foundational contributions. Although the application of quantization and efficiency to large language models may be newer, the math behind is not an invention of the field and has been around for decades.
+
+Viewing this from another angle, this may be further evidence that the velocity of the field is actually increasing. While other repos have had several more years to accumulate stars, new repos, even those just created this year, have a distribution of stars and forks that is still roughly comparable to popular repos from older years. 
+
+**Repository Size**
+
+From the graphs, it looks like the mean or median size of the repositories has a slight downard trend over time since 2016. The median size has stayed roughly around or below 10K. This could be because as the field grows, there are more repositories that are focused on specific techniques or applications, which may not require as large of a codebase as some of the earlier, more foundational repositories. It could also be because some of the newer repositories are more focused on providing tools and libraries for model efficiency, which may not require as much code as some of the earlier repositories that were more focused on research and experimentation.
+
+```{python}
+#| echo: false
+#| label: fig-yearly-summary
+#| fig-cap: "Yearly Trends in Repository Count, Stars, Forks, and Size"
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
+
+df_plot = df_clean.copy()
+df_plot['year_jitter'] = df_plot['year'] + np.random.uniform(-0.2, 0.2, size=len(df_plot))
+
+def standard_error(x):
+    return x.std() / np.sqrt(len(x)) if len(x) > 0 else 0
+
+yearly_stats = (
+    df_plot.groupby('year')
+    .agg(
+        mean_stars=('stargazers_count', 'mean'),
+        se_stars=('stargazers_count', standard_error),
+        mean_forks=('forks_count', 'mean'),
+        se_forks=('forks_count', standard_error),
+        mean_size=('size', 'mean'),
+        se_size=('size', standard_error),
+        n_repos=('year', 'count')
+    )
+    .reset_index()
+)
+
+fig = make_subplots(
+    rows=2, cols=2,
+    subplot_titles=(
+        "Repository Count", "Stars (Mean + SE)", 
+        "Forks (Mean + SE)", "Size KB (Mean + SE)"
+    )
+)
+
+# add dots / mean overlay
+def add_combined_trace(fig, x_raw, y_raw, x_stats, y_mean, y_err, row, col, color, name):
+    fig.add_trace(
+        go.Scatter(
+            x=x_raw, y=y_raw, mode='markers',
+            marker=dict(size=4, opacity=0.2, color=color),
+            name=f"{name} (repos)", hoverinfo='text',
+            text=df_plot['name']
+        ), row=row, col=col
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x_stats, y=y_mean, mode='markers+lines',
+            marker=dict(size=10, color='black', symbol='diamond'),
+            line=dict(color='black', width=2),
+            error_y=dict(type='data', array=y_err, visible=True, thickness=2, width=4),
+            name=f"{name} (mean)"
+        ), row=row, col=col
+    )
+
+fig.add_trace(
+    go.Bar(x=yearly_stats['year'], y=yearly_stats['n_repos'], marker_color='#636EFA'),
+    row=1, col=1
+)
+
+add_combined_trace(fig, df_plot['year_jitter'], df_plot['stargazers_count'], 
+                   yearly_stats['year'], yearly_stats['mean_stars'], yearly_stats['se_stars'], 
+                   1, 2, '#EF553B', 'Stars')
+
+add_combined_trace(fig, df_plot['year_jitter'], df_plot['forks_count'], 
+                   yearly_stats['year'], yearly_stats['mean_forks'], yearly_stats['se_forks'], 
+                   2, 1, '#00CC96', 'Forks')
+
+add_combined_trace(fig, df_plot['year_jitter'], df_plot['size'], 
+                   yearly_stats['year'], yearly_stats['mean_size'], yearly_stats['se_size'], 
+                   2, 2, '#AB63FA', 'Size')
+
+fig.update_yaxes(type="log", row=1, col=2)
+fig.update_yaxes(type="log", row=2, col=1)
+fig.update_yaxes(type="log", row=2, col=2)
+
+fig.update_layout(
+    template="plotly_white", height=800, width=1000, showlegend=False,
+    title="Individual Distribution vs. Annual Mean (Log Scale)"
+)
+
+fig.show()
+```
+
+
+```{python}
+#| echo: false
+#| label: fig-yearly-quantiles-full
+#| fig-cap: "Evolution of Engagement and Complexity: Median and IQR ribbons for Stars, Forks, and Size."
+
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
+
+def q25(x): return x.quantile(0.25)
+def q75(x): return x.quantile(0.75)
+
+# 1. Update Aggregation to include Size
+yearly_q = (
+    df_plot.groupby('year')
+    .agg(
+        med_s=('stargazers_count', 'median'),
+        low_s=('stargazers_count', q25),
+        high_s=('stargazers_count', q75),
+        med_f=('forks_count', 'median'),
+        low_f=('forks_count', q25),
+        high_f=('forks_count', q75),
+        med_z=('size', 'median'),
+        low_z=('size', q25),
+        high_z=('size', q75)
+    )
+    .reset_index()
+)
+
+# 2. Create 1x3 Subplots
+fig = make_subplots(
+    rows=1, cols=3, 
+    subplot_titles=("Stars Distribution", "Forks Distribution", "Size (KB) Distribution")
+)
+
+def add_ribbon_trace(fig, stats_df, col_med, col_low, col_high, row, col, color, name):
+    # 75th percentile
+    fig.add_trace(go.Scatter(
+        x=stats_df['year'], y=stats_df[col_high],
+        mode='lines', line=dict(width=0),
+        showlegend=False, hoverinfo='skip'
+    ), row=row, col=col)
+    
+    # 25th percentile + Fill
+    fig.add_trace(go.Scatter(
+        x=stats_df['year'], y=stats_df[col_low],
+        mode='lines', line=dict(width=0),
+        fill='tonexty', fillcolor=color,
+        showlegend=False, hoverinfo='skip'
+    ), row=row, col=col)
+    
+    # Median line
+    fig.add_trace(go.Scatter(
+        x=stats_df['year'], y=stats_df[col_med],
+        mode='lines+markers',
+        line=dict(color='black', width=2),
+        marker=dict(size=4),
+        name=f"Median {name}"
+    ), row=row, col=col)
+
+# Add Ribbons
+add_ribbon_trace(fig, yearly_q, 'med_s', 'low_s', 'high_s', 1, 1, 'rgba(239, 85, 59, 0.2)', 'Stars')
+add_ribbon_trace(fig, yearly_q, 'med_f', 'low_f', 'high_f', 1, 2, 'rgba(0, 204, 150, 0.2)', 'Forks')
+add_ribbon_trace(fig, yearly_q, 'med_z', 'low_z', 'high_z', 1, 3, 'rgba(171, 99, 250, 0.2)', 'Size')
+
+# Overlay individual dots
+fig.add_trace(go.Scatter(x=df_plot['year_jitter'], y=df_plot['stargazers_count'], 
+                         mode='markers', marker=dict(size=2, opacity=0.3, color='#EF553B'),
+                         showlegend=False), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_plot['year_jitter'], y=df_plot['forks_count'], 
+                         mode='markers', marker=dict(size=2, opacity=0.3, color='#00CC96'),
+                         showlegend=False), row=1, col=2)
+fig.add_trace(go.Scatter(x=df_plot['year_jitter'], y=df_plot['size'], 
+                         mode='markers', marker=dict(size=2, opacity=0.3, color='#AB63FA'),
+                         showlegend=False), row=1, col=3)
+
+# Configuration & Labels
+fig.update_xaxes(title_text="Year Created")
+fig.update_yaxes(type="log") # Apply log to all Y axes
+
+fig.update_yaxes(title_text="Stars (Log)", row=1, col=1)
+fig.update_yaxes(title_text="Forks (Log)", row=1, col=2)
+fig.update_yaxes(title_text="Size KB (Log)", row=1, col=3)
+
+fig.update_layout(
+    template="plotly_white", 
+    title="Evolution of Repository Engagement and Size (Median & IQR Ribbons)",
+    height=500,
+    width=1100,
+    showlegend=False
+)
+
+fig.show()
+```
+
+
+### (2) Hypothesis 1 (Shift in focus from academic -> production)
+```{python}
+#| echo: false
+#| label: tbl-maturity
+#| tbl-cap: "Comparison of Engagement and Complexity: Organizations vs. Individuals"
+
+maturity_stats = df_clean.groupby('is_org')[['stargazers_count', 'size', 'forks_count']].median()
+maturity_stats.index = ['Individual (User)', 'Professional (Organization)']
+maturity_stats.columns = ['Median Stars', 'Median Size (KB)', 'Median Forks']
+
+display(HTML(maturity_stats.round(2).to_html(classes='table table-hover', border=0)))
+```
+
+```{python}
+#| echo: false
+#| label: fig-org-dist
+#| fig-cap: "Engagement and Complexity Distribution: Organizations vs. Individuals"
+
+fig_org = make_subplots(rows=1, cols=2, subplot_titles=("Stars Distribution", "Size Distribution"))
+
+# Stars Boxplot
+fig_org.add_trace(
+    go.Box(x=df_clean['is_org'].map({True: 'Org', False: 'Indiv'}), 
+           y=df_clean['stargazers_count'], name="Stars", marker_color='#636EFA'),
+    row=1, col=1
+)
+
+# Size Boxplot
+fig_org.add_trace(
+    go.Box(x=df_clean['is_org'].map({True: 'Org', False: 'Indiv'}), 
+           y=df_clean['size'], name="Size", marker_color='#AB63FA'),
+    row=1, col=2
+)
+
+fig_org.update_yaxes(type="log", row=1, col=1, title="Stars (Log)")
+fig_org.update_yaxes(type="log", row=1, col=2, title="Size KB (Log)")
+fig_org.update_layout(template="plotly_white", showlegend=False, height=450)
+fig_org.show()
+```
+
+My first hypothesis was that there has been a shift in the focus of the repositories, from more academic experimentation to more production ready engineering solutions, characterized by larger repository sizes and a higher proportion of organization-led vs individual projects.
+
+Firstly, from the table we can see that there seems to be a difference in the median number of stars, forks, and size for organization-led vs. individual-led projects. Organization-led projects have a median of 331 stars, 41.5 forks, and a size of 331 KB, while individual-led projects have a median of 179 stars, 23 forks, and a size of 3250 KB. This suggests that organization-led projects tend to have higher community engagement and larger codebases compared to individual-led projects.
+
+
+```{python}
+#| label: fig-org-composition
+#| fig-cap: "Proportional Evolution: Organization vs. Individual Repository Creation (2012–2026)"
+import plotly.express as px
+
+# 1. Prepare the data: Group by year and 'is_org', counting repos
+composition_data = df_clean.groupby(['year', 'is_org']).size().reset_index(name='repo_count')
+
+# 2. Map the boolean is_org to readable labels
+composition_data['Owner Type'] = composition_data['is_org'].map({True: 'Organization', False: 'Individual'})
+
+# 3. Create a Stacked Area Chart, normalized to 100%
+fig_org_trend = px.area(
+    composition_data, 
+    x="year", 
+    y="repo_count", 
+    color="Owner Type",
+    groupnorm='fraction', # This transforms the counts into percentages (0-1)
+    title="Annual Composition of Model-Efficiency Repositories, by owner type",
+    labels={'repo_count': 'Percentage of Total Repos', 'year': 'Year Created'},
+    # Use your defined color scheme for organizations
+    color_discrete_map={'Organization': '#EF553B', 'Individual': '#636EFA'}
+)
+
+# 4. Format the Y-axis to display as percentages
+fig_org_trend.update_layout(
+    template="plotly_white",
+    yaxis_tickformat=".0%", # Displays '0.5' as '50%'
+    legend=dict(title_text='Owner Type')
+)
+
+fig_org_trend.show()
+```
+
+The figure that shows the composition of the repositories based on owner types shows some interesting results. In 2017, it shows that 90% of the repos were from individual owners, rather than organization accounts. Then roughly, it seems like from 2017 to 2022 there may have been an increase in the level of repos from organizations compared to individuals, with 58% of the repos having an organization owner in 2022. But, from 2023-the present there has been a slight decrease in organization-owned repos again, with 49% in 2025 and 21% in 2026. This may be because the release of large open source projects like Llama-2 (Touvron et al. 2023) might also lower barrier entry to individual contributors.
+
+Overall though, we can see that the split is roughly 50/50, which suggests that this field is currently a hybrid one that is neither dominated by large organizations (like it might be for more mature fields such as web development or mobile app development), nor is it dominated by individual contributors / purely academic niches. The two types may contribute in different ways, with tradeoffs in scale and agility.
+
+Note, since organizations may create repos in alliance with some quartly schedules, the sharp decrease in proportion for 2026 may not be accurate as it is still only March. The small sample size prior to 2016 mean the graph may not be very informative for those years.
+
+
+### (3) Hypothesis 2 (Shift in language from interpreted to compiled)
+
+The following figure shows the proportion of languages used in these popular repositories, based on their creation year. We can see that from 2016-2022, there is an increasing trend of python as the dominant language, with nearly all repositories in 2022 having python as their dominant language. However, post 2022, there has been decreasing market share for python as we see an increase in C++ , Rust, and Go. In particular, the increase of C++ seems to be the most immediate / pronounced, with Rust seeing a smaller increasing in popularity / a slightly later increasing in popularity in 2024-2025. 
+
+C++ and Rust are compiled languages that offer much lower-level control over memory and hardware resources than Python. Their growing proportion in repositories created in more recent years suggests a shift in focus from convenience to performance in this field. The community seems to be moving down the stack in order to look for even more significant performance improvements. Since python is an interpreted language, there is a lot of overhead which is especially significant for LLMs, where latency could translate to massive compute costs. 
+
+While C++ and Rust are gaining ground for the performant math, Go represents interest in the orchestration layer of production ML as well.
+
+```{python}
+#| echo: false
+#| label: fig-lang-trend
+#| fig-cap: "Proportional Shift in Programming Languages (2022-2026)"
+
+# 1. Prepare the data
+df_clean['year'] = df_clean['created_at'].dt.year
+trend_data = df_clean.groupby(['year', 'language']).size().reset_index(name='repo_count')
+
+top_langs = ['Python', 'C++', 'Rust', 'Go', 'C']
+trend_data_filtered = trend_data[trend_data['language'].isin(top_langs)]
+
+# 3. Create a Stacked Area Chart (Normalized to 100%)
+fig = px.area(trend_data_filtered, x="year", y="repo_count", color="language",
+              groupnorm='fraction', # This turns it into percentages
+              title="Percentage of Repositories by Language",
+              labels={'repo_count': 'Percentage of Total Repos', 'year': 'Year Created'},
+              color_discrete_sequence=px.colors.qualitative.Safe)
+
+fig.update_layout(template="plotly_white", yaxis_tickformat=".0%")
+fig.show()
+```
+
+
+### (4) Hypothesis 3 (Overall growth of the field)
+
+Finally, this last figure, which shows the number of repos each month, confirms the non-linear growth hypothesized in hypothesis 3. The sharp escalation in repository creation immediately following the release of ChatGPT in late 2022 suggests that open-source efficiency development is a reactive discipline triggered by foundational model breakthroughs. This is shown again there seems to be a spike in models released in Mar 2024, which occurs after the Llama-2 release, one of the most popular open-source models with a strong focus on efficiency. 
+
+Interestingly though, it looks like there seems to be a decreasing trend since 2024. This could be because several breakthrough repositories were released in 2023 and early 2024, which may have temporarily satiated the demand for new repositories, and growth may be occuring more in the form of contributions to existing repositories rather than the creation of new repositories. The field is still quite young and there may be a lot of foundational work that needed to be done in the early years, which may have led to a surge in repository creation, but as the field matures, there may be less need for new repositories and more focus on improving and building on existing ones.
+
+In addition, there seems to be seasonal patterns potentially underlying this data. For example, there may be more repositories created in the first quarter of the year, as organizations and individuals set new goals and projects for the year. There may also be a slowdown in repository creation towards the end of the year, as people take time off for holidays and end-of-year activities. 
+
+
+```{python}
+#| echo: false
+#| label: fig-growth
+#| fig-cap: "Evolution of Repository Creation (2022-2026)"
+
+# Ensure dates are correct
+df_clean['created_at'] = pd.to_datetime(df_clean['created_at'])
+df_clean['month_year'] = df_clean['created_at'].dt.to_period('M').astype(str)
+
+growth_data = df_clean.groupby('month_year').size().reset_index(name='count')
+
+fig_growth = px.line(growth_data, x='month_year', y='count', 
+                     title="Monthly Creation of Model Efficiency Repositories",
+                     labels={'month_year': 'Date', 'count': 'Number of Repos'},
+                     markers=True)
+
+# Adding the Llama-2 annotation (paper was released 18 Jul 2023 on arXiv, and the model was open-sourced shortly after)
+fig_growth.add_annotation(x='2023-07', y=growth_data[growth_data['month_year'] == '2023-07']['count'].values[0],
+            text="Llama-2 Released", showarrow=True, arrowhead=1)
+
+fig_growth.update_layout(template="plotly_white")
+fig_growth.show()
+```
+
+## Summary
+
+Our preliminary analysis of the top 1,000 model efficiency repositories reveals a field in transition. It is clear that the arrival of ChatGPT in late 2022 served as a general catalyst, with other notable checkpoints in the data as well such as the release of Llama-2 or Deepseek.
+
+In terms of my initial hypotheses, these were some preliminary findings:
+
+- **Shift in focus** : The ecosystem has evolved into a hybrid landscape. While organizations manage a professionalized tier with significantly higher median engagement and larger codebases, individual contributors still drive nearly 50% of repository volume. This suggests that the high-stakes engineering bottleneck of LLM deployment is being solved through a combination of corporate scale,  individual contributor agility, and research innovation.
+
+- **Shift in languages**: Python remains the dominant language, but we observe a measurable expansion of C++ and Rust share since 2023. This supports the hypothesis that as models move into production, the community is increasingly willing to trade development ease for hardware-critical performance.
+
+- **Growth of the field**: It seems like the field is reactive, as seen in the spike in repository creation following major model releases. The current decline in new repository births likely signals a shift from exploratory creation to ecosystem consolidation, where community effort is focused on contributing to established repositories like vLLM rather than starting fresh projects.
+
+### Final Project Plan
+Here, we have some interesting insights from initial visualizations. For the final phase, I will transition from descriptive visualization to formal statistical inference and predictive modeling. 
+
+I am interested in seeing what predictors there may be of repository popularity, using models such as a Random Forest Classfier for whether or not the repo has >1000 stars, or a Linear Regression model for number of stars. 
+
+**H1: Shift from academic experimentation -> professional industry**
+In this report, we looked a binary is_org indicators as a proxy for production repos vs individual/academic repos. However, repos that were created by an individual may still grow to large production-ready sizes. As a next step, I can look into creating a composite score of maturity for each repository. This feature will incorporate has_wiki, has_pages, and open_issues_count to quantify the level of professional maintenance. By analyzing feature importance, I can determine if organizational backing or repository size is the primary predictor of project longevity.
+
+**H2: The Pivot from Interpreted to Compiled Languages**
+
+We can perform N-gram and TF-IDF analysis on repository descriptions to see if the "compiled" repos use different semantic clusters (e.g., "latency," "throughput," "memory-safe") compared to Python-only repos.
+
+To address the recency bias, I will calculate Engagement Velocity (Stars/Month). I will then use a Kruskal-Wallis test to see if compiled languages (C++, Rust) accumulate community attention faster than Python projects in the post-2023 era.
+
+**H3: Non-Linear Growth and Industry Shocks"**
+
+I will apply Latent Dirichlet Allocation to track the birth and death of specific sub-topics over time (e.g., the transition from general distillation to specific 4-bit quantization").
+
+In our preliminary analysis, we saw that this may be a reactive field with some key timepoints like the release of ChatGPT, or release of Llama-2. It may be interesting to analyze how many repos have topics that are tied to a specific model name as well.
+
+## References
+
+1. Dettmers, T., Lewis, M., Belkada, Y., & Zettlemoyer, L. (2022). Gpt3. int8 (): 8-bit matrix multiplication for transformers at scale. Advances in neural information processing systems, 35, 30318-30332.
+
+2. Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., ... & Stoica, I. (2023, October). Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th symposium on operating systems principles (pp. 611-626).
+
+3. Touvron, H., Martin, L., Stone, K., Albert, P., Almahairi, A., Babaei, Y., ... & Scialom, T. (2023). Llama 2: Open foundation and fine-tuned chat models. arXiv preprint arXiv:2307.09288.
+
+4. Bi, X., Chen, D., Chen, G., Chen, S., Dai, D., Deng, C., ... & Zou, Y. (2024). Deepseek llm: Scaling open-source language models with longtermism. arXiv preprint arXiv:2401.02954.
